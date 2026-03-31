@@ -39,7 +39,7 @@ use signal_generator::{self, Source};
 use stabilizer::convert::{AdcCode, DacCode, Gain};
 
 // The number of cascaded IIR biquads per channel. Select 1 or 2!
-const IIR_CASCADE_LENGTH: usize = 1;
+const IIR_CASCADE_LENGTH: usize = 2;
 
 // The number of samples in each batch process
 const BATCH_SIZE: usize = 8;
@@ -177,6 +177,12 @@ pub struct DualIir {
     /// Can be multicast.
     #[tree(with=miniconf::leaf)]
     stream: stream::Target,
+    /// Current internal DAC code
+    #[tree(with=miniconf::leaf)]
+    cpu_dac1: u16,
+    /// Current external DAC code
+    #[tree(with=miniconf::leaf)]
+    frontend_offset: u16,
 }
 
 impl Default for DualIir {
@@ -186,6 +192,8 @@ impl Default for DualIir {
             trigger: false,
             stream: Default::default(),
             ch: Default::default(),
+            cpu_dac1: 4095,
+            frontend_offset: 32768,
         }
     }
 }
@@ -224,10 +232,10 @@ mod app {
     use stabilizer::{
         hardware::{
             self, DigitalInput0, DigitalInput1, Pgia, SerialTerminal,
-            SystemTimer, Systick, UsbDevice,
+            SystemTimer, Systick, UsbDevice, CpuDacOutput1, GpioDacSpi,
             adc::{Adc0Input, Adc1Input},
             dac::{Dac0Output, Dac1Output},
-            hal,
+            hal::{self, prelude::*, traits::DacOut},
             net::{NetworkState, NetworkUsers},
             timers::SamplingTimer,
         },
@@ -254,6 +262,8 @@ mod app {
         dacs: (Dac0Output, Dac1Output),
         generator: FrameGenerator,
         cpu_temp_sensor: stabilizer::hardware::cpu_temp_sensor::CpuTempSensor,
+        cpu_dac1: CpuDacOutput1,
+        gpio_dac_spi: GpioDacSpi,
     }
 
     #[init]
@@ -302,6 +312,8 @@ mod app {
             dacs: stabilizer.dacs,
             generator,
             cpu_temp_sensor: stabilizer.temperature_sensor,
+            cpu_dac1: stabilizer.cpu_dac1,
+            gpio_dac_spi: stabilizer.gpio_dac_spi,
         };
 
         // Enable ADC/DAC events
@@ -451,11 +463,20 @@ mod app {
         }
     }
 
-    #[task(priority = 1, local=[afes], shared=[network, settings, active])]
+    #[task(priority = 1, local=[afes, cpu_dac1, gpio_dac_spi], shared=[network, settings, active])]
     async fn settings_update(mut c: settings_update::Context) {
         c.shared.settings.lock(|settings| {
             c.local.afes[0].set_gain(settings.dual_iir.ch[0].gain);
             c.local.afes[1].set_gain(settings.dual_iir.ch[1].gain);
+
+            c.local.cpu_dac1.set_value(settings.dual_iir.cpu_dac1);
+            if let Err(err) = c
+                .local
+                .gpio_dac_spi
+                .write(&[settings.dual_iir.frontend_offset])
+            {
+                log::error!("Failed to update frontend offset DAC: {:?}", err);
+            }
 
             if settings.dual_iir.trigger {
                 settings.dual_iir.trigger = false;

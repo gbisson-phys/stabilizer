@@ -1,6 +1,4 @@
 #!/usr/bin/python3
-# pylint: disable=too-few-public-methods
-
 """Stabilizer streaming receiver and parsers"""
 
 import argparse
@@ -11,10 +9,23 @@ import socket
 import ipaddress
 from collections import namedtuple
 from dataclasses import dataclass
-
+import matplotlib.pyplot as plt
+from scipy.signal import welch
+from scipy.integrate import simpson
 import numpy as np
 
-from . import DAC_VOLTS_PER_LSB
+import stabilizer
+
+import stabilizer.iir_biquad_filter
+
+# The number of DAC LSB codes per volt on Stabilizer outputs.
+DAC_LSB_PER_VOLT = (1 << 16) / (4.096 * 5)
+
+# The number of volts per ADC LSB.
+ADC_VOLTS_PER_LSB = (5.0 / 2.0 * 4.096) / (1 << 15)
+
+# The number of volts per DAC LSB.
+DAC_VOLTS_PER_LSB = 1 / DAC_LSB_PER_VOLT
 
 logger = logging.getLogger(__name__)
 
@@ -31,37 +42,10 @@ def get_local_ip(remote):
     Returns a list of four octets."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        sock.connect((remote, 9))  # discard
+        sock.connect((remote, 1883))
         return sock.getsockname()[0]
     finally:
         sock.close()
-
-
-class Frame:
-    """Stream frame constisting of a header and multiple data batches"""
-
-    # The magic header half-word at the start of each packet.
-    magic = 0x057B
-    header_fmt = struct.Struct("<HBBI")
-    header = namedtuple("Header", "magic format_id batches sequence")
-    parsers = {}
-
-    @classmethod
-    def register(cls, fmt):
-        """Register a format"""
-        cls.parsers[fmt.format_id] = fmt
-
-    @classmethod
-    def parse(cls, data):
-        """Parse known length frame"""
-        header = cls.header._make(cls.header_fmt.unpack_from(data))
-        if header.magic != cls.magic:
-            raise ValueError(f"Bad frame magic: {header.magic:#04x}")
-        try:
-            parser = cls.parsers[header.format_id]
-        except KeyError as exc:
-            raise ValueError(f"No parser for format: {header.format_id}") from exc
-        return parser(header, data[cls.header_fmt.size :])
 
 
 class AdcDac:
@@ -84,7 +68,7 @@ class AdcDac:
         data = data.reshape(self.header.batches, 4, -1)
         data = data.swapaxes(0, 1).reshape(4, -1)
         # convert DAC offset binary to two's complement
-        data[2:] ^= np.int16(0x8000)
+        data[2:] ^= np.uint16(0x8000)
         return data
 
     def to_si(self):
@@ -106,147 +90,47 @@ class AdcDac:
         ]
 
 
-Frame.register(AdcDac)
-
-
-class ThermostatEem:
-    """Thermostat-EEM format"""
-
-    format_id = 3
-
-    def __init__(self, header, body):
-        self.header = header
-        self.body = body
-
-    def size(self):
-        """Return the data size of the frame in bytes"""
-        return len(self.body)
-
-    def to_si(self):
-        """Return the parsed data in SI units"""
-        return np.frombuffer(
-            self.body, np.dtype([("input", "<f4", (4, 4)), ("output", "<f4", (4,))])
-        )
-
-
-Frame.register(ThermostatEem)
-
-
-class Fls:
-    """FLS application stream format"""
-
-    format_id = 2
-
-    def __init__(self, header, body):
-        self.header = header
-        self.body = body
-
-    def size(self):
-        """Return the data size of the frame in bytes"""
-        return len(self.body)
-
-    def to_mu(self):
-        """Return the raw data in machine units"""
-        data = np.frombuffer(self.body, "<i4")
-        data = data.reshape(-1, 2, 7)
-        return data
-
-    def demod(self):
-        """Return baseband signal"""
-        return self.to_mu()[:, :, :2]
-
-
-Frame.register(Fls)
-
-
-class Mpll:
-    """MPLL application stream format"""
-
-    format_id = 4
-
-    dtype = np.dtype([("demod", "<i4", (2, 2)), ("phase", "<i4"), ("frequency", "<i4")])
-
-    def __init__(self, header, body):
-        self.header = header
-        self.body = body
-
-    def size(self):
-        """Return the data size of the frame in bytes"""
-        return len(self.body)
-
-    def to_mu(self):
-        """Return the raw data in machine units"""
-        return np.frombuffer(self.body, self.dtype)
-
-
-Frame.register(Mpll)
-
-
-class Fls2:
-    """FLS2 application stream format"""
-
-    format_id = 5
-
-    def __init__(self, header, body):
-        self.header = header
-        self.body = body
-
-    def size(self):
-        """Return the data size of the frame in bytes"""
-        return len(self.body)
-
-    def to_mu(self):
-        """Return the raw data in machine units"""
-        data = np.frombuffer(self.body, "<i4")
-        return data
-
-
-Frame.register(Fls2)
-
-
-class Stream(asyncio.DatagramProtocol):
+class StabilizerStream(asyncio.DatagramProtocol):
     """Stabilizer streaming receiver protocol"""
 
+    # The magic header half-word at the start of each packet.
+    magic = 0x057B
+    header_fmt = struct.Struct("<HBBI")
+    header = namedtuple("Header", "magic format_id batches sequence")
+    parsers = {
+        AdcDac.format_id: AdcDac,
+    }
+
     @classmethod
-    async def open(cls, port=9293, addr="0.0.0.0", local="0.0.0.0", maxsize=1):
+    async def open(cls, addr, port, broker, maxsize=1):
         """Open a UDP socket and start receiving frames"""
         loop = asyncio.get_running_loop()
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        except NameError:
-            pass  # Windows
-        # Increase the OS UDP receive buffer size so that latency
-        # spikes don't impact much. Achieving this may require increasing
+
+        # Increase the OS UDP receive buffer size to 4 MiB so that latency
+        # spikes don't impact much. Achieving 4 MiB may require increasing
         # the max allowed buffer size, e.g. via
         # `sudo sysctl net.core.rmem_max=26214400` but nowadays the default
-        # max appears to be ~ 50 MiB already, at least on Linux.
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 << 20)
-        # We need to specify which interface to receive multicasts from, or Windows may choose the
-        # wrong one. Thus, use a bind address to figure out our local address for the interface
-        # of interest. There's also an interface index, at least on linux, but apparently windows
-        # sockets don't do that.
+        # max appears to be ~ 50 MiB already.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 << 20)
+
+        # We need to specify which interface to receive broadcasts from, or Windows may choose the
+        # wrong one. Thus, use the broker address to figure out our local address for the interface
+        # of interest.
         if ipaddress.ip_address(addr).is_multicast:
-            multiaddr = socket.inet_aton(addr)
-            local = socket.inet_aton(local)
-            sock.setsockopt(
-                socket.IPPROTO_IP,
-                socket.IP_ADD_MEMBERSHIP,
-                multiaddr + local,
-            )
-            try:
-                # OS filter
-                sock.setsockopt(
-                    socket.IPPROTO_IP, getattr(socket, "IP_MULTICAST_ALL", 49), 0
-                )
-            except OSError:
-                pass  # Windows
-        sock.bind((addr, port))
-        return await loop.create_datagram_endpoint(
-            lambda: cls(maxsize),
-            sock=sock,
+            print("Subscribing to multicast")
+            group = socket.inet_aton(addr)
+            iface = socket.inet_aton(".".join([str(x) for x in get_local_ip(broker)]))
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, group + iface)
+            sock.bind(("", port))
+        else:
+            sock.bind((addr, port))
+
+        transport, protocol = await loop.create_datagram_endpoint(
+            lambda: cls(maxsize), sock=sock
         )
+        return transport, protocol
 
     def __init__(self, maxsize):
         self.queue = asyncio.Queue(maxsize)
@@ -258,11 +142,16 @@ class Stream(asyncio.DatagramProtocol):
         logger.info("Connection lost")
 
     def datagram_received(self, data, _addr):
-        try:
-            frame = Frame.parse(data)
-        except ValueError as e:
-            logger.warning("Parse error: %s", e)
+        header = self.header._make(self.header_fmt.unpack_from(data))
+        if header.magic != self.magic:
+            logger.warning("Bad frame magic: %#04x, ignoring", header.magic)
             return
+        try:
+            parser = self.parsers[header.format_id]
+        except KeyError:
+            logger.warning("No parser for format %s, ignoring", header.format_id)
+            return
+        frame = parser(header, data[self.header_fmt.size :])
         if self.queue.full():
             old = self.queue.get_nowait()
             logger.debug("Dropping frame: %#08x", old.header.sequence)
@@ -270,7 +159,7 @@ class Stream(asyncio.DatagramProtocol):
 
 
 async def measure(stream, duration):
-    """Measure throughput and loss of stream reception"""
+    """Measure throughput and loss of stream reception, return the adc and dac data in SI units"""
 
     @dataclass
     class _Statistics:
@@ -280,8 +169,10 @@ async def measure(stream, duration):
         bytes = 0
 
     stat = _Statistics()
+    frames = []
 
     async def _record():
+        nonlocal frames
         while True:
             frame = await stream.queue.get()
             if stat.expect is not None:
@@ -289,6 +180,7 @@ async def measure(stream, duration):
             stat.received += frame.header.batches
             stat.expect = wrap(frame.header.sequence + frame.header.batches)
             stat.bytes += frame.size()
+            frames.append(frame)
 
     try:
         await asyncio.wait_for(_record(), timeout=duration)
@@ -300,43 +192,155 @@ async def measure(stream, duration):
     )
 
     sent = stat.received + stat.lost
-    loss = stat.lost / sent if sent else 1
+    if sent:
+        loss = stat.lost / sent
+    else:
+        loss = 1
     logger.info("Loss: %s/%s batches (%g %%)", stat.lost, sent, loss * 1e2)
-    return loss
+
+    # convert the frames into numpy arrays
+    chucks_si = [chuck.to_si() for chuck in frames]
+    adc1 = np.concatenate([chuck_si["adc"][0] for chuck_si in chucks_si])
+    adc2 = np.concatenate([chuck_si["adc"][1] for chuck_si in chucks_si])
+    dac1 = np.concatenate([chuck_si["dac"][0] for chuck_si in chucks_si])
+    dac2 = np.concatenate([chuck_si["dac"][1] for chuck_si in chucks_si])
+
+    return loss, adc1, adc2, dac1, dac2
+
+
+async def update_stream(args):
+    fig, axs = plt.subplots(2, 2)
+    plt.ion()  # Turn on interactive mode
+    while True:
+        _transport, stream = await StabilizerStream.open(
+            args.host, args.port, args.broker, args.maxsize
+        )
+        _loss, adc1, adc2, dac1, dac2 = await measure(stream, args.duration)
+
+        # calculate the power spectral density
+        fs = 1 / stabilizer.SAMPLE_PERIOD
+        v_error_to_Ic_noise = 750 / (5 * args.N * 2020)
+        freq_i, psd_i = welch(
+            adc1 * v_error_to_Ic_noise, fs, nperseg=int(float(args.psd_nperseg))
+        )
+        freq_dac, psd_dac = welch(
+            dac1 * v_error_to_Ic_noise, fs, nperseg=int(float(args.psd_nperseg))
+        )
+        t_s = np.arange(0, adc1.size) / fs
+
+        # filter the ADC data
+        filter = stabilizer.iir_biquad_filter.IirBiquadFilter(
+            filter_type="notch", f0=15.625e3, K=1, Q=1
+        )
+
+        # print frequency at which a max of the PSD occurs
+        print(
+            f"Frequency at which the maximum of the PSD occurs: {freq_i[np.argmax(psd_i)]} Hz"
+        )
+
+        # Noise measurements in ppm
+        # Up to 2 Khz
+        Inoise = np.sqrt(simpson(y=psd_i[freq_i < 2e3], dx=freq_i[1] - freq_i[0]))
+        ppm_noise = Inoise / args.I * 1e6
+
+        print(f"Noise up to 2kHz: {ppm_noise} ppm")
+
+        # Set fixed y-axis limits
+        dac_ymin, dac_ymax = -10.5, 10.5
+        adc_ymin, adc_ymax = -5.0, 5.0
+        psd_ymin, psd_ymax = 1e-14, 5e-7
+
+        # Update the plots here
+        for ax in axs.flat:
+            ax.clear()
+
+        # ADC0
+        axs[0, 0].plot(t_s, adc1)
+        axs[0, 0].set_ylim(adc_ymin, adc_ymax)
+        axs[0, 0].set_xlabel("Time [s]")
+        axs[0, 0].set_ylabel("Voltage [V]")
+        axs[0, 0].set_title("ADC0")
+
+        # PSD current noise
+        axs[0, 1].plot(np.round(freq_i / 1e3, 2), psd_i)
+        axs[0, 1].set_ylim(psd_ymin, psd_ymax)
+        axs[0, 1].set_yscale("log")
+        axs[0, 1].set_xscale("log")
+        axs[0, 1].set_xlabel("Frequency [kHz]")
+        axs[0, 1].set_ylabel("PSD [A**2/Hz]")
+        axs[0, 1].set_title("PSD current noise")
+        axs[0, 1].axvline(
+            x=15.625,
+            color="r",
+            linestyle="--",
+            label="Flux excitation frequency + higher harmonics",
+        )
+        axs[0, 1].axvline(x=15.625 * 2, color="r", linestyle="--")
+        axs[0, 1].axvline(x=15.625 * 3, color="r", linestyle="--")
+        axs[0, 1].axvline(x=15.625 * 4, color="r", linestyle="--")
+        axs[0, 1].axvline(x=50e-3, color="b", linestyle="--", label="50 Hz")
+        axs[0, 1].legend()
+
+        # DAC0
+        axs[1, 0].plot(t_s, dac1)
+        axs[1, 0].set_ylim(dac_ymin, dac_ymax)
+        axs[1, 0].set_xlabel("Time [s]")
+        axs[1, 0].set_ylabel("Voltage [V]")
+        axs[1, 0].set_title("DAC0")
+
+        # PSD DAC0
+        axs[1, 1].plot(np.round(freq_dac / 1e3, 2), psd_dac)
+        axs[1, 1].set_ylim(psd_ymin, psd_ymax)
+        axs[1, 1].set_yscale("log")
+        axs[1, 1].set_xscale("log")
+        axs[1, 1].set_xlabel("Frequency [kHz]")
+        axs[1, 1].set_ylabel("PSD [A**2/Hz]")
+        axs[1, 1].set_title("PSD current noise")
+        axs[1, 1].axvline(
+            x=15.625, color="r", linestyle="--", label="Flux excitation frequency"
+        )
+        axs[1, 1].axvline(x=50e-3, color="b", linestyle="--", label="50 Hz")
+        axs[1, 1].legend()
+
+        plt.draw()
+        plt.pause(0.01)  # Pause to allow the plot to update
+
+        await asyncio.sleep(args.sleep)
 
 
 async def main():
     """Test CLI"""
     parser = argparse.ArgumentParser(description="Stabilizer streaming demo")
     parser.add_argument(
-        "--port", type=int, default=9293, help="Local port to listen on [%(default)s]"
+        "--port", type=int, default=1234, help="Local port to listen on"
+    )
+    parser.add_argument("--host", default="0.0.0.0", help="Local address to listen on")
+    parser.add_argument(
+        "--broker", default="192.168.199.251", help="The MQTT broker address"
+    )
+    parser.add_argument("--maxsize", type=int, default=1, help="Frame queue size")
+    parser.add_argument("--duration", type=float, default=1, help="Test duration")
+    parser.add_argument(
+        "--psd-nperseg", default=256 * 8, help="Number of samples per segment"
     )
     parser.add_argument(
-        "--host", default="0.0.0.0", help="Local address to listen on [%(default)s]"
+        "--sleep", type=float, default=1, help="Sleep duration between updates"
     )
     parser.add_argument(
-        "--local",
-        default="0.0.0.0",
-        help="The local IP address to receive multicast frames on [%(default)s]",
+        "--N",
+        type=int,
+        default=1,
+        help="Number of wingings around flux gate sensor. Default is 1.",
     )
     parser.add_argument(
-        "--broker", help="The MQTT broker address for local IP lookup [%(default)s]"
-    )
-    parser.add_argument(
-        "--maxsize", type=int, default=1, help="Frame queue size [%(default)s]"
-    )
-    parser.add_argument(
-        "--duration", type=float, default=1.0, help="Test duration [%(default)s]"
+        "--I",
+        type=float,
+        default=200,
+        help="Current through the coil in A. Default is 200 A.",
     )
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO)
-    if args.broker is not None:
-        args.local = get_local_ip(args.broker)
-    _transport, stream = await Stream.open(
-        args.port, args.host, args.local, args.maxsize
-    )
-    await measure(stream, args.duration)
+    await update_stream(args)
 
 
 if __name__ == "__main__":
