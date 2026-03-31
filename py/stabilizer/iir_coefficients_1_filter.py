@@ -371,23 +371,28 @@ def _main():
             # Set the filter coefficients.
             # Note: In the future, we will need to Handle higher-order cascades.
             await interface.set(
-                f"/iir_ch/{args.channel}/0",
+                f"/dual_iir/ch/{args.channel}/biquad/0",
                 {
-                    "ba": coefficients,
-                    "u": stabilizer.voltage_to_machine_units(
-                        args.y_offset + forward_gain * args.x_offset
-                    ),
-                    "min": stabilizer.voltage_to_machine_units(args.y_min),
-                    "max": stabilizer.voltage_to_machine_units(args.y_max),
+                    "typ": "Raw",
+                    "repr": {
+                        "Raw": {
+                            "coeff": {"ba": coefficients},
+                            "u": stabilizer.voltage_to_machine_units(
+                                args.y_offset + forward_gain * args.x_offset
+                            ),
+                            "min": stabilizer.voltage_to_machine_units(args.y_min),
+                            "max": stabilizer.voltage_to_machine_units(args.y_max),
+                        }
+                    }
                 },
             )
             print(f"Set filter coefficients: {coefficients}")
             await interface.set(
-                path="/cpu_dac1",
+                path="/dual_iir/cpu_dac1",
                 value=args.cpu_dac1,
             )
             await interface.set(
-                path="/frontend_offset",
+                path="/dual_iir/frontend_offset",
                 value=args.frontend_offset,
             )
 

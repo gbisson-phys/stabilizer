@@ -417,36 +417,46 @@ def _main():
             # If cascade length is 1, ignore the second filter
             for cascade_idx in range(args.iir_cascade_length):
                 await interface.set(
-                    f"/iir_ch/{args.channel}/{cascade_idx}",
+                    f"/dual_iir/ch/{args.channel}/biquad/{cascade_idx}",
                     {
-                        "ba": coefficients_list[cascade_idx],
-                        "u": stabilizer.voltage_to_machine_units(
-                            args.y_offset + forward_gains[cascade_idx] * args.x_offset
-                        ),
-                        "min": stabilizer.voltage_to_machine_units(args.y_min),
-                        "max": stabilizer.voltage_to_machine_units(args.y_max),
+                        "typ": "Raw",
+                        "repr": {
+                            "Raw": {
+                                "coeff": {"ba": coefficients_list[cascade_idx]},
+                                "u": stabilizer.voltage_to_machine_units(
+                                    args.y_offset + forward_gains[cascade_idx] * args.x_offset
+                                ),
+                                "min": stabilizer.voltage_to_machine_units(args.y_min),
+                                "max": stabilizer.voltage_to_machine_units(args.y_max),
+                            }
+                        }
                     },
                 )
             if args.iir_cascade_length == 1:
                 await interface.set(
-                    f"/iir_ch/{args.channel}/1",
+                    f"/dual_iir/ch/{args.channel}/biquad/1",
                     {
-                        "ba": [1, 0, 0, 0, 0],
-                        "u": stabilizer.voltage_to_machine_units(args.y_offset),
-                        "min": stabilizer.voltage_to_machine_units(args.y_min),
-                        "max": stabilizer.voltage_to_machine_units(args.y_max),
+                        "typ": "Raw",
+                        "repr": {
+                            "Raw": {
+                                "coeff": {"ba": [1, 0, 0, 0, 0]},
+                                "u": stabilizer.voltage_to_machine_units(args.y_offset),
+                                "min": stabilizer.voltage_to_machine_units(args.y_min),
+                                "max": stabilizer.voltage_to_machine_units(args.y_max),
+                            }
+                        }
                     },
                 )
             await interface.set(
-                path="/cpu_dac1",
+                path="/dual_iir/cpu_dac1",
                 value=args.cpu_dac1,
             )
             await interface.set(
-                path="/frontend_offset",
+                path="/dual_iir/frontend_offset",
                 value=args.frontend_offset,
             )
             await interface.set(
-                path="/stream_target",
+                path="/dual_iir/stream",
                 value=args.stream_target,
             )
 
