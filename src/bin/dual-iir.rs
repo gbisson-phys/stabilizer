@@ -220,9 +220,9 @@ impl Default for DualIir {
             // representations, for example as described in https://arxiv.org/abs/1508.06319
             iir_ch: [[i; IIR_CASCADE_LENGTH]; 2],
 
-            // Permit the DI1 digital input to suppress filter output updates.
+            // Force output to 0 and suppress filter output updates. Transitions reset the filter state.
             allow_hold: false,
-            // Force suppress filter output updates.
+            // Force output to 0 and suppress filter output updates. Transitions reset the filter state.
             force_hold: false,
             // The default telemetry period in seconds.
             telemetry_period: 10,
@@ -263,6 +263,7 @@ mod app {
         cpu_temp_sensor: stabilizer::hardware::cpu_temp_sensor::CpuTempSensor,
         cpu_dac1: CpuDacOutput1,
         gpio_dac_spi: GpioDacSpi,
+        prev_hold: bool,
     }
 
     #[init]
@@ -321,6 +322,7 @@ mod app {
             cpu_temp_sensor: stabilizer.temperature_sensor,
             cpu_dac1: stabilizer.cpu_dac1,
             gpio_dac_spi: stabilizer.gpio_dac_spi,
+            prev_hold: false,
         };
 
         // Enable ADC/DAC events
@@ -367,7 +369,7 @@ mod app {
     ///
     /// Because the ADC and DAC operate at the same rate, these two constraints actually implement
     /// the same time bounds, meeting one also means the other is also met.
-    #[task(binds=DMA1_STR4, local=[digital_inputs, adcs, dacs, iir_state, generator], shared=[active_settings, signal_generator, telemetry], priority=3)]
+    #[task(binds=DMA1_STR4, local=[digital_inputs, adcs, dacs, iir_state, generator, prev_hold], shared=[active_settings, signal_generator, telemetry], priority=3)]
     #[link_section = ".itcm.process"]
     fn process(c: process::Context) {
         let process::SharedResources {
@@ -383,6 +385,7 @@ mod app {
             dacs: (dac0, dac1),
             iir_state,
             generator,
+            prev_hold,
             ..
         } = c.local;
 
@@ -394,6 +397,16 @@ mod app {
 
                 let hold = settings.force_hold
                     || (digital_inputs[1] && settings.allow_hold);
+
+                // Reset IIR state on hold edges
+                if hold != *prev_hold {
+                    *prev_hold = hold;
+                    for channel_state in iir_state.iter_mut() {
+                        for cascade_state in channel_state.iter_mut() {
+                            *cascade_state = [0.0; 4];
+                        }
+                    }
+                }
 
                 (adc0, adc1, dac0, dac1).lock(|adc0, adc1, dac0, dac1| {
                     let adc_samples = [adc0, adc1];
@@ -409,18 +422,17 @@ mod app {
                             .zip(&mut signal_generator[channel])
                             .map(|((ai, di), signal)| {
                                 let x = f32::from(*ai as i16);
-                                let y = settings.iir_ch[channel]
-                                    .iter()
-                                    .zip(iir_state[channel].iter_mut())
-                                    .fold(x, |yi, (ch, state)| {
-                                        let filter = if hold {
-                                            &iir::Biquad::HOLD
-                                        } else {
-                                            ch
-                                        };
-
-                                        filter.update(state, yi)
-                                    });
+                                let y = if hold {
+                                    // Biquad state is cleared and we bypass the filter.
+                                    0.0
+                                } else {
+                                    settings.iir_ch[channel]
+                                        .iter()
+                                        .zip(iir_state[channel].iter_mut())
+                                        .fold(x, |yi, (ch, state)| {
+                                            ch.update(state, yi)
+                                        })
+                                };
 
                                 // Note(unsafe): The filter limits must ensure that the value is in range.
                                 // The truncation introduces 1/2 LSB distortion.
