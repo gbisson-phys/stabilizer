@@ -250,7 +250,10 @@ class RealtimePlotter(QtWidgets.QMainWindow):
                     logger=logging.getLogger("aiomqtt-client"),
                 ) as client:
                     if not self.args.no_discover:
-                        prefix, _alive = await miniconf.discover_one(client, self.args.prefix)
+                        discovered = await miniconf.discover(client, self.args.prefix)
+                        if not discovered:
+                            raise RuntimeError("No miniconf devices discovered")
+                        prefix = list(discovered.keys())[0]
                     else:
                         prefix = self.args.prefix
                     interface = miniconf.Miniconf(client, prefix)

@@ -396,7 +396,10 @@ def _main():
             logger=logging.getLogger("aiomqtt-client"),
         ) as client:
             if not args.no_discover:
-                prefix, _alive = await miniconf.discover_one(client, args.prefix)
+                discovered = await miniconf.discover(client, args.prefix)
+                if not discovered:
+                    raise RuntimeError("No miniconf devices discovered")
+                prefix = list(discovered.keys())[0]
             else:
                 prefix = args.prefix
 
