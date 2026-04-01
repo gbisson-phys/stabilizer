@@ -292,12 +292,6 @@ def _main():
     )
 
     parser.add_argument(
-        "--x-offset",
-        type=float,
-        default=0,
-        help="The channel input offset (%(default)s V)",
-    )
-    parser.add_argument(
         "--y-min",
         type=float,
         default=-stabilizer.DAC_FULL_SCALE,
@@ -308,12 +302,6 @@ def _main():
         type=float,
         default=stabilizer.DAC_FULL_SCALE,
         help="The channel maximum output (%(default)s V)",
-    )
-    parser.add_argument(
-        "--y-offset",
-        type=float,
-        default=0,
-        help="The channel output offset (%(default)s V)",
     )
     parser.add_argument(
         "--iir-cascade-length",
@@ -388,24 +376,15 @@ def _main():
         configs_list.append(config)
         forward_gains.append(forward_gain)
 
-    # The feed-forward gain of the IIR filter
-    for forward_gain in forward_gains:
-        if forward_gain == 0 and args.x_offset != 0:
-            logger.warning("Filter has no DC gain but x_offset is non-zero")
-
     # Finalize dictionaries with boundaries and offsets
     for cascade_idx in range(args.iir_cascade_length):
         c = configs_list[cascade_idx]
         typ = c["typ"]
         inner = c["repr"][typ]
         if typ == "Filter":
-            inner["offset"] = stabilizer.voltage_to_machine_units(
-                args.y_offset + forward_gains[cascade_idx] * args.x_offset
-            )
+            inner["offset"] = 0.0
         elif typ == "Pid":
-            inner["setpoint"] = -args.x_offset
-            if args.y_offset != 0:
-                logger.warning("Pid filter ignores y_offset natively")
+            inner["setpoint"] = 0.0
         inner["min"] = stabilizer.voltage_to_machine_units(args.y_min)
         inner["max"] = stabilizer.voltage_to_machine_units(args.y_max)
 
@@ -438,7 +417,7 @@ def _main():
                         "repr": {
                             "Raw": {
                                 "coeff": {"ba": [1.0, 0.0, 0.0, 0.0, 0.0]},
-                                "u": stabilizer.voltage_to_machine_units(args.y_offset),
+                                "u": 0.0,
                                 "min": stabilizer.voltage_to_machine_units(args.y_min),
                                 "max": stabilizer.voltage_to_machine_units(args.y_max),
                             }

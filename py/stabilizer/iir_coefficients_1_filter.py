@@ -290,12 +290,6 @@ def _main():
     )
 
     parser.add_argument(
-        "--x-offset",
-        type=float,
-        default=0,
-        help="The channel input offset (%(default)s V)",
-    )
-    parser.add_argument(
         "--y-min",
         type=float,
         default=-stabilizer.DAC_FULL_SCALE,
@@ -306,12 +300,6 @@ def _main():
         type=float,
         default=stabilizer.DAC_FULL_SCALE,
         help="The channel maximum output (%(default)s V)",
-    )
-    parser.add_argument(
-        "--y-offset",
-        type=float,
-        default=0,
-        help="The channel output offset (%(default)s V)",
     )
     parser.add_argument(
         "--cpu-dac1", type=int, default=2048, help="CPU DAC1 value (%(default)s)"
@@ -343,19 +331,12 @@ def _main():
     config, forward_gain = filters[args.filter_type].coefficients(args)
 
     # The feed-forward gain of the IIR filter
-    if forward_gain == 0 and args.x_offset != 0:
-        logger.warning("Filter has no DC gain but x_offset is non-zero")
-
     typ = config["typ"]
     inner = config["repr"][typ]
     if typ == "Filter":
-        inner["offset"] = stabilizer.voltage_to_machine_units(
-            args.y_offset + forward_gain * args.x_offset
-        )
+        inner["offset"] = 0.0
     elif typ == "Pid":
-        inner["setpoint"] = -args.x_offset
-        if args.y_offset != 0:
-            logger.warning("Pid filter ignores y_offset natively")
+        inner["setpoint"] = 0.0
     inner["min"] = stabilizer.voltage_to_machine_units(args.y_min)
     inner["max"] = stabilizer.voltage_to_machine_units(args.y_max)
 
