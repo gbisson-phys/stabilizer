@@ -155,99 +155,92 @@ def get_filters():
 
 
 def lowpass_coefficients(args):
-    """Calculate low-pass IIR filter coefficients."""
-    f0_bar = pi * args.f0 * args.sample_period
-
-    a1 = (1 - f0_bar) / (1 + f0_bar)
-    b0 = args.K * (f0_bar / (1 + f0_bar))
-    b1 = args.K * f0_bar / (1 + f0_bar)
-
-    return [b0, b1, 0, -a1, 0]
+    """Return low-pass IIR filter configuration."""
+    return {
+        "typ": "Filter",
+        "repr": {
+            "Filter": {
+                "typ": "Lowpass",
+                "frequency": args.f0,
+                "gain": args.K,
+            }
+        }
+    }, args.K
 
 
 def highpass_coefficients(args):
-    """Calculate high-pass IIR filter coefficients."""
-    f0_bar = pi * args.f0 * args.sample_period
-
-    a1 = (1 - f0_bar) / (1 + f0_bar)
-    b0 = args.K * (f0_bar / (1 + f0_bar))
-    b1 = -args.K / (1 + f0_bar)
-
-    return [b0, b1, 0, -a1, 0]
+    """Return high-pass IIR filter configuration."""
+    return {
+        "typ": "Filter",
+        "repr": {
+            "Filter": {
+                "typ": "Highpass",
+                "frequency": args.f0,
+                "gain": args.K,
+            }
+        }
+    }, args.K
 
 
 def allpass_coefficients(args):
-    """Calculate all-pass IIR filter coefficients."""
-    f0_bar = pi * args.f0 * args.sample_period
-
-    a1 = (1 - f0_bar) / (1 + f0_bar)
-
-    b0 = args.K * (1 - f0_bar) / (1 + f0_bar)
-    b1 = -args.K
-
-    return [b0, b1, 0, -a1, 0]
+    """Return all-pass IIR filter configuration."""
+    return {
+        "typ": "Filter",
+        "repr": {
+            "Filter": {
+                "typ": "Allpass",
+                "frequency": args.f0,
+                "gain": args.K,
+            }
+        }
+    }, args.K
 
 
 def notch_coefficients(args):
-    """Calculate notch IIR filter coefficients."""
-    f0_bar = pi * args.f0 * args.sample_period
-
-    denominator = 1 + f0_bar / args.Q + f0_bar**2
-
-    a1 = 2 * (1 - f0_bar**2) / denominator
-    a2 = -(1 - f0_bar / args.Q + f0_bar**2) / denominator
-    b0 = args.K * (1 + f0_bar**2) / denominator
-    b1 = -(2 * args.K * (1 - f0_bar**2)) / denominator
-    b2 = args.K * (1 + f0_bar**2) / denominator
-
-    return [b0, b1, b2, -a1, -a2]
+    """Return notch IIR filter configuration."""
+    return {
+        "typ": "Filter",
+        "repr": {
+            "Filter": {
+                "typ": "Notch",
+                "frequency": args.f0,
+                "gain": args.K,
+                "shape": {"Q": args.Q},
+            }
+        }
+    }, args.K
 
 
 def pid_coefficients(args):
-    """Calculate PID IIR filter coefficients."""
-
-    # Determine filter order
+    """Return PID IIR filter configuration."""
     if args.Kii != 0:
-        assert (args.Kdd, args.Kd, args.Kdd_limit, args.Kd_limit) == (
-            0,
-            0,
-            float("inf"),
-            float("inf"),
-        ), "IIR filters I^2 and D or D^2 gain/limit are unsupported"
-        order = 2
+        order = "I2"
     elif args.Ki != 0:
-        assert (args.Kdd, args.Kdd_limit) == (
-            0,
-            float("inf"),
-        ), "IIR filters with I and D^2 gain/limit are unsupported"
-        order = 1
+        order = "I"
     else:
-        order = 0
+        order = "P"
 
-    kernels = [[1, 0, 0], [1, -1, 0], [1, -2, 1]]
-
-    gains = [args.Kii, args.Ki, args.Kp, args.Kd, args.Kdd]
-    limits = [
-        args.Kii / args.Kii_limit,
-        args.Ki / args.Ki_limit,
-        1,
-        args.Kd / args.Kd_limit,
-        args.Kdd / args.Kdd_limit,
-    ]
-    w = 2 * pi * args.sample_period
-    b = [
-        sum(gains[2 - order + i] * w ** (order - i) * kernels[i][j] for i in range(3))
-        for j in range(3)
-    ]
-
-    a = [
-        sum(limits[2 - order + i] * w ** (order - i) * kernels[i][j] for i in range(3))
-        for j in range(3)
-    ]
-    b = [i / a[0] for i in b]
-    a = [i / a[0] for i in a]
-    assert a[0] == 1
-    return b + [ai for ai in a[1:]]
+    return {
+        "typ": "Pid",
+        "repr": {
+            "Pid": {
+                "order": order,
+                "gain": {
+                    "i2": args.Kii,
+                    "i": args.Ki,
+                    "p": args.Kp,
+                    "d": args.Kd,
+                    "d2": args.Kdd,
+                },
+                "limit": {
+                    "i2": args.Kii_limit if args.Kii_limit != float("inf") else None,
+                    "i": args.Ki_limit if args.Ki_limit != float("inf") else None,
+                    "d": args.Kd_limit if args.Kd_limit != float("inf") else None,
+                    "d2": args.Kdd_limit if args.Kdd_limit != float("inf") else None,
+                }
+            }
+        }
+    }, args.Kp
 
 
 def _main():
@@ -347,13 +340,24 @@ def _main():
     )
 
     # Calculate the IIR coefficients for the filter.
-    coefficients = filters[args.filter_type].coefficients(args)
+    config, forward_gain = filters[args.filter_type].coefficients(args)
 
-    # The feed-forward gain of the IIR filter is the summation
-    # of the "b" components of the filter.
-    forward_gain = sum(coefficients[:3])
+    # The feed-forward gain of the IIR filter
     if forward_gain == 0 and args.x_offset != 0:
         logger.warning("Filter has no DC gain but x_offset is non-zero")
+
+    typ = config["typ"]
+    inner = config["repr"][typ]
+    if typ == "Filter":
+        inner["offset"] = stabilizer.voltage_to_machine_units(
+            args.y_offset + forward_gain * args.x_offset
+        )
+    elif typ == "Pid":
+        inner["setpoint"] = -args.x_offset
+        if args.y_offset != 0:
+            logger.warning("Pid filter ignores y_offset natively")
+    inner["min"] = stabilizer.voltage_to_machine_units(args.y_min)
+    inner["max"] = stabilizer.voltage_to_machine_units(args.y_max)
 
     async def configure():
         async with miniconf.Client(
@@ -372,21 +376,9 @@ def _main():
             # Note: In the future, we will need to Handle higher-order cascades.
             await interface.set(
                 f"/dual_iir/ch/{args.channel}/biquad/0",
-                {
-                    "typ": "Raw",
-                    "repr": {
-                        "Raw": {
-                            "coeff": {"ba": coefficients},
-                            "u": stabilizer.voltage_to_machine_units(
-                                args.y_offset + forward_gain * args.x_offset
-                            ),
-                            "min": stabilizer.voltage_to_machine_units(args.y_min),
-                            "max": stabilizer.voltage_to_machine_units(args.y_max),
-                        }
-                    }
-                },
+                config,
             )
-            print(f"Set filter coefficients: {coefficients}")
+            print(f"Set filter representation: {config}")
             await interface.set(
                 path="/dual_iir/cpu_dac1",
                 value=args.cpu_dac1,

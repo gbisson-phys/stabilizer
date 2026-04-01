@@ -157,99 +157,92 @@ def get_filters():
 
 
 def lowpass_coefficients(args):
-    """Calculate low-pass IIR filter coefficients."""
-    f0_bar = pi * args.f0 * args.sample_period
-
-    a1 = (1 - f0_bar) / (1 + f0_bar)
-    b0 = args.K * (f0_bar / (1 + f0_bar))
-    b1 = args.K * f0_bar / (1 + f0_bar)
-
-    return [b0, b1, 0, -a1, 0]
+    """Return low-pass IIR filter configuration."""
+    return {
+        "typ": "Filter",
+        "repr": {
+            "Filter": {
+                "typ": "Lowpass",
+                "frequency": args.f0,
+                "gain": args.K,
+            }
+        }
+    }, args.K
 
 
 def highpass_coefficients(args):
-    """Calculate high-pass IIR filter coefficients."""
-    f0_bar = pi * args.f0 * args.sample_period
-
-    a1 = (1 - f0_bar) / (1 + f0_bar)
-    b0 = args.K * (f0_bar / (1 + f0_bar))
-    b1 = -args.K / (1 + f0_bar)
-
-    return [b0, b1, 0, -a1, 0]
+    """Return high-pass IIR filter configuration."""
+    return {
+        "typ": "Filter",
+        "repr": {
+            "Filter": {
+                "typ": "Highpass",
+                "frequency": args.f0,
+                "gain": args.K,
+            }
+        }
+    }, args.K
 
 
 def allpass_coefficients(args):
-    """Calculate all-pass IIR filter coefficients."""
-    f0_bar = pi * args.f0 * args.sample_period
-
-    a1 = (1 - f0_bar) / (1 + f0_bar)
-
-    b0 = args.K * (1 - f0_bar) / (1 + f0_bar)
-    b1 = -args.K
-
-    return [b0, b1, 0, -a1, 0]
+    """Return all-pass IIR filter configuration."""
+    return {
+        "typ": "Filter",
+        "repr": {
+            "Filter": {
+                "typ": "Allpass",
+                "frequency": args.f0,
+                "gain": args.K,
+            }
+        }
+    }, args.K
 
 
 def notch_coefficients(args):
-    """Calculate notch IIR filter coefficients."""
-    f0_bar = pi * args.f0 * args.sample_period
-
-    denominator = 1 + f0_bar / args.Q + f0_bar**2
-
-    a1 = 2 * (1 - f0_bar**2) / denominator
-    a2 = -(1 - f0_bar / args.Q + f0_bar**2) / denominator
-    b0 = args.K * (1 + f0_bar**2) / denominator
-    b1 = -(2 * args.K * (1 - f0_bar**2)) / denominator
-    b2 = args.K * (1 + f0_bar**2) / denominator
-
-    return [b0, b1, b2, -a1, -a2]
+    """Return notch IIR filter configuration."""
+    return {
+        "typ": "Filter",
+        "repr": {
+            "Filter": {
+                "typ": "Notch",
+                "frequency": args.f0,
+                "gain": args.K,
+                "shape": {"Q": args.Q},
+            }
+        }
+    }, args.K
 
 
 def pid_coefficients(args):
-    """Calculate PID IIR filter coefficients."""
-
-    # Determine filter order
+    """Return PID IIR filter configuration."""
     if args.Kii != 0:
-        assert (args.Kdd, args.Kd, args.Kdd_limit, args.Kd_limit) == (
-            0,
-            0,
-            float("inf"),
-            float("inf"),
-        ), "IIR filters I^2 and D or D^2 gain/limit are unsupported"
-        order = 2
+        order = "I2"
     elif args.Ki != 0:
-        assert (args.Kdd, args.Kdd_limit) == (
-            0,
-            float("inf"),
-        ), "IIR filters with I and D^2 gain/limit are unsupported"
-        order = 1
+        order = "I"
     else:
-        order = 0
+        order = "P"
 
-    kernels = [[1, 0, 0], [1, -1, 0], [1, -2, 1]]
-
-    gains = [args.Kii, args.Ki, args.Kp, args.Kd, args.Kdd]
-    limits = [
-        args.Kii / args.Kii_limit,
-        args.Ki / args.Ki_limit,
-        1,
-        args.Kd / args.Kd_limit,
-        args.Kdd / args.Kdd_limit,
-    ]
-    w = 2 * pi * args.sample_period
-    b = [
-        sum(gains[2 - order + i] * w ** (order - i) * kernels[i][j] for i in range(3))
-        for j in range(3)
-    ]
-
-    a = [
-        sum(limits[2 - order + i] * w ** (order - i) * kernels[i][j] for i in range(3))
-        for j in range(3)
-    ]
-    b = [i / a[0] for i in b]
-    a = [i / a[0] for i in a]
-    assert a[0] == 1
-    return b + [ai for ai in a[1:]]
+    return {
+        "typ": "Pid",
+        "repr": {
+            "Pid": {
+                "order": order,
+                "gain": {
+                    "i2": args.Kii,
+                    "i": args.Ki,
+                    "p": args.Kp,
+                    "d": args.Kd,
+                    "d2": args.Kdd,
+                },
+                "limit": {
+                    "i2": args.Kii_limit if args.Kii_limit != float("inf") else None,
+                    "i": args.Ki_limit if args.Ki_limit != float("inf") else None,
+                    "d": args.Kd_limit if args.Kd_limit != float("inf") else None,
+                    "d2": args.Kdd_limit if args.Kdd_limit != float("inf") else None,
+                }
+            }
+        }
+    }, args.Kp
 
 
 def _main():
@@ -381,7 +374,8 @@ def _main():
         def __init__(self, **entries):
             self.__dict__.update(entries)
 
-    coefficients_list = []
+    configs_list = []
+    forward_gains = []
     for idx, filter_type in enumerate(filter_types):
         suffix = f"_{idx}"
         filter_args = {
@@ -390,15 +384,30 @@ def _main():
             if key.endswith(suffix)
         }
         filter_args["sample_period"] = args.sample_period
-        coefficients = filters[filter_type].coefficients(FilterArgs(**filter_args))
-        coefficients_list.append(coefficients)
+        config, forward_gain = filters[filter_type].coefficients(FilterArgs(**filter_args))
+        configs_list.append(config)
+        forward_gains.append(forward_gain)
 
-    # The feed-forward gain of the IIR filter is the summation
-    # of the "b" components of the filter.
-    forward_gains = [sum(coefficients[:3]) for coefficients in coefficients_list]
+    # The feed-forward gain of the IIR filter
     for forward_gain in forward_gains:
         if forward_gain == 0 and args.x_offset != 0:
             logger.warning("Filter has no DC gain but x_offset is non-zero")
+
+    # Finalize dictionaries with boundaries and offsets
+    for cascade_idx in range(args.iir_cascade_length):
+        c = configs_list[cascade_idx]
+        typ = c["typ"]
+        inner = c["repr"][typ]
+        if typ == "Filter":
+            inner["offset"] = stabilizer.voltage_to_machine_units(
+                args.y_offset + forward_gains[cascade_idx] * args.x_offset
+            )
+        elif typ == "Pid":
+            inner["setpoint"] = -args.x_offset
+            if args.y_offset != 0:
+                logger.warning("Pid filter ignores y_offset natively")
+        inner["min"] = stabilizer.voltage_to_machine_units(args.y_min)
+        inner["max"] = stabilizer.voltage_to_machine_units(args.y_max)
 
     async def configure():
         async with miniconf.Client(
@@ -418,28 +427,17 @@ def _main():
             for cascade_idx in range(args.iir_cascade_length):
                 await interface.set(
                     f"/dual_iir/ch/{args.channel}/biquad/{cascade_idx}",
-                    {
-                        "typ": "Raw",
-                        "repr": {
-                            "Raw": {
-                                "coeff": {"ba": coefficients_list[cascade_idx]},
-                                "u": stabilizer.voltage_to_machine_units(
-                                    args.y_offset + forward_gains[cascade_idx] * args.x_offset
-                                ),
-                                "min": stabilizer.voltage_to_machine_units(args.y_min),
-                                "max": stabilizer.voltage_to_machine_units(args.y_max),
-                            }
-                        }
-                    },
+                    configs_list[cascade_idx],
                 )
             if args.iir_cascade_length == 1:
+                # Idle the disabled cascade block as Raw pass-through to not break it
                 await interface.set(
                     f"/dual_iir/ch/{args.channel}/biquad/1",
                     {
                         "typ": "Raw",
                         "repr": {
                             "Raw": {
-                                "coeff": {"ba": [1, 0, 0, 0, 0]},
+                                "coeff": {"ba": [1.0, 0.0, 0.0, 0.0, 0.0]},
                                 "u": stabilizer.voltage_to_machine_units(args.y_offset),
                                 "min": stabilizer.voltage_to_machine_units(args.y_min),
                                 "max": stabilizer.voltage_to_machine_units(args.y_max),
