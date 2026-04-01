@@ -16,6 +16,7 @@ from pyqtgraph.Qt import QtWidgets, QtCore
 import qasync
 from scipy.signal import welch
 
+import miniconf
 import stabilizer
 
 # Constants
@@ -240,6 +241,26 @@ class RealtimePlotter(QtWidgets.QMainWindow):
         self.collection_duration = value
 
     async def update_loop(self):
+        if self.args.stream:
+            try:
+                async with miniconf.Client(
+                    self.args.broker,
+                    protocol=miniconf.MQTTv5,
+                    logger=logging.getLogger("aiomqtt-client"),
+                ) as client:
+                    if not self.args.no_discover:
+                        prefix, _alive = await miniconf.discover_one(client, self.args.prefix)
+                    else:
+                        prefix = self.args.prefix
+                    interface = miniconf.Miniconf(client, prefix)
+                    await interface.set(
+                        path="/dual_iir/stream",
+                        value=self.args.stream,
+                    )
+                    logger.info("Miniconf stream setting configured: %s", self.args.stream)
+            except Exception as e:
+                logger.error("Failed to set stream via miniconf: %s", e)
+
         while self.isVisible():
             if not self.streaming_enabled:
                 await asyncio.sleep(0.1)
@@ -312,6 +333,23 @@ async def main():
     parser.add_argument("--maxsize", type=int, default=10, help="Frame queue size")
     parser.add_argument(
         "--duration", type=float, default=1.0, help="Initial data collection time"
+    )
+    parser.add_argument(
+        "--stream",
+        type=str,
+        default="",
+        help='IP and port to stream config via Miniconf, e.g. "10.42.0.1:1234"',
+    )
+    parser.add_argument(
+        "--prefix",
+        type=str,
+        default="dt/sinara/dual-iir/+",
+        help="The MQTT topic prefix of the target",
+    )
+    parser.add_argument(
+        "--no-discover",
+        action="store_true",
+        help="Do not discover the prefix using the alive message",
     )
     parser.add_argument("--psd-nperseg", default=2**12, help="Samples per PSD segment")
     parser.add_argument("--N", type=int, default=1, help="Number of windings")
