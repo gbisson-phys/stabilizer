@@ -11,6 +11,7 @@ import argparse
 import asyncio
 import collections
 import logging
+import aiomqtt
 
 from math import pi, inf
 
@@ -343,7 +344,7 @@ def _main():
     async def configure():
         async with miniconf.Client(
             args.broker,
-            protocol=miniconf.MQTTv5,
+            protocol=aiomqtt.ProtocolVersion.V5,
             logger=logging.getLogger("aiomqtt-client"),
         ) as client:
             if not args.no_discover:

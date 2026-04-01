@@ -17,6 +17,7 @@ import qasync
 from scipy.signal import welch
 
 import miniconf
+import aiomqtt
 import stabilizer
 
 # Constants
@@ -87,7 +88,7 @@ class AdcDac:
         data = data.reshape(self.header.batches, 4, -1)
         data = data.swapaxes(0, 1).reshape(4, -1)
         # convert DAC offset binary to two's complement
-        data[2:] ^= np.int16(0x8000)
+        data[2:] ^= np.array(0x8000, dtype=np.uint16).view(np.int16)
         return data
 
     def to_si(self):
@@ -245,7 +246,7 @@ class RealtimePlotter(QtWidgets.QMainWindow):
             try:
                 async with miniconf.Client(
                     self.args.broker,
-                    protocol=miniconf.MQTTv5,
+                    protocol=aiomqtt.ProtocolVersion.V5,
                     logger=logging.getLogger("aiomqtt-client"),
                 ) as client:
                     if not self.args.no_discover:
