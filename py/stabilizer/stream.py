@@ -329,9 +329,6 @@ class RealtimePlotter(QtWidgets.QMainWindow):
 
 async def main():
     parser = argparse.ArgumentParser(description="Stabilizer streaming demo")
-    parser.add_argument(
-        "--port", type=int, default=1234, help="Local port to listen on"
-    )
     parser.add_argument("--host", default="0.0.0.0", help="Local address to listen on")
     parser.add_argument("--broker", default="mqtt", help="The MQTT broker address")
     parser.add_argument("--maxsize", type=int, default=10, help="Frame queue size")
@@ -361,6 +358,17 @@ async def main():
         "--I", type=float, default=200.0, help="Current through coil (A)"
     )
     args = parser.parse_args()
+
+    if args.stream:
+        try:
+            _, port_str = args.stream.rsplit(":", 1)
+            args.port = int(port_str)
+        except ValueError:
+            parser.error(f'Invalid stream target format "{args.stream}", expected "IP:PORT"')
+    else:
+        args.port = 1234
+    
+    logger.info("Using local port %d for streaming", args.port)
 
     app = pg.mkQApp("Stabilizer Stream")
     loop = qasync.QEventLoop(app)
