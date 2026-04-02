@@ -405,27 +405,37 @@ def _main():
 
             interface = miniconf.Miniconf(client, prefix)
 
+            async def set_recursive(base_path, data):
+                """Helper to set all leaves in a dictionary recursively"""
+                if isinstance(data, dict):
+                    for key, val in data.items():
+                        await set_recursive(f"{base_path}/{key}", val)
+                else:
+                    await interface.set(base_path, data)
+
             # Set the filter coefficients.
-            # If cascade length is 1, ignore the second filter
             for cascade_idx in range(args.iir_cascade_length):
-                await interface.set(
-                    f"/ch/{args.channel}/biquad/{cascade_idx}",
-                    configs_list[cascade_idx],
-                )
+                c = configs_list[cascade_idx]
+                typ = c["typ"]
+                path = f"/ch/{args.channel}/biquad/{cascade_idx}"
+                
+                # 1. Switch the variant
+                await interface.set(f"{path}/typ", typ)
+                
+                # 2. Set the parameters for that variant
+                await set_recursive(f"{path}/repr/{typ}", c["repr"][typ])
+                
             if args.iir_cascade_length == 1:
                 # Idle the disabled cascade block as Raw pass-through to not break it
+                path = f"/ch/{args.channel}/biquad/1"
+                await interface.set(f"{path}/typ", "Raw")
                 await interface.set(
-                    f"/ch/{args.channel}/biquad/1",
+                    f"{path}/repr/Raw",
                     {
-                        "typ": "Raw",
-                        "repr": {
-                            "Raw": {
-                                "coeff": {"ba": [1.0, 0.0, 0.0, 0.0, 0.0]},
-                                "u": 0.0,
-                                "min": stabilizer.voltage_to_machine_units(args.y_min),
-                                "max": stabilizer.voltage_to_machine_units(args.y_max),
-                            }
-                        }
+                        "coeff": {"ba": [1.0, 0.0, 0.0, 0.0, 0.0]},
+                        "u": 0.0,
+                        "min": stabilizer.voltage_to_machine_units(args.y_min),
+                        "max": stabilizer.voltage_to_machine_units(args.y_max),
                     },
                 )
             await interface.set(

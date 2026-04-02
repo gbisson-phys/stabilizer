@@ -357,12 +357,24 @@ def _main():
 
             interface = miniconf.Miniconf(client, prefix)
 
-            # Set the filter coefficients.
-            # Note: In the future, we will need to Handle higher-order cascades.
-            await interface.set(
-                f"/ch/{args.channel}/biquad/0",
-                config,
-            )
+            async def set_recursive(base_path, data):
+                """Helper to set all leaves in a dictionary recursively"""
+                if isinstance(data, dict):
+                    for key, val in data.items():
+                        await set_recursive(f"{base_path}/{key}", val)
+                else:
+                    # In this enum variant of Miniconf, Raw is a leaf.
+                    #idsp 0.20+ BiquadRepr::Raw is marked leaf.
+                    await interface.set(base_path, data)
+
+            # 1. Switch the variant
+            typ = config["typ"]
+            path = f"/ch/{args.channel}/biquad/0"
+            await interface.set(f"{path}/typ", typ)
+
+            # 2. Set parameters
+            await set_recursive(f"{path}/repr/{typ}", config["repr"][typ])
+
             print(f"Set filter representation: {config}")
             await interface.set(
                 path="/cpu_dac1",
