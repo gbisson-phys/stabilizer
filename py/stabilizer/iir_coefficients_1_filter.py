@@ -360,20 +360,20 @@ def _main():
             # Set the filter coefficients.
             # Note: In the future, we will need to Handle higher-order cascades.
             await interface.set(
-                f"dual_iir/ch/{args.channel}/biquad/0",
+                f"ch/{args.channel}/biquad/0",
                 config,
             )
             print(f"Set filter representation: {config}")
             await interface.set(
-                path="dual_iir/cpu_dac1",
+                path="cpu_dac1",
                 value=args.cpu_dac1,
             )
             await interface.set(
-                path="dual_iir/frontend_offset",
+                path="frontend_offset",
                 value=args.frontend_offset,
             )
             await interface.set(
-                path="dual_iir/stream",
+                path="stream",
                 value=args.stream_target,
             )
 

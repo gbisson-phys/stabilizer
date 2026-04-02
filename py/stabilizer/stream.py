@@ -258,7 +258,7 @@ class RealtimePlotter(QtWidgets.QMainWindow):
                         prefix = self.args.prefix
                     interface = miniconf.Miniconf(client, prefix)
                     await interface.set(
-                        path="dual_iir/stream",
+                        path="stream",
                         value=self.args.stream,
                     )
                     logger.info("Miniconf stream setting configured: %s", self.args.stream)
