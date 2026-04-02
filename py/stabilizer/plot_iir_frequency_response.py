@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from scipy import signal
 
 import stabilizer
-from stabilizer.iir_coefficients import get_filters
+from stabilizer.iir_configuration import get_filters
 
 # disable warnings about short variable names and similar code
 # pylint: disable=invalid-name, duplicate-code, redefined-builtin

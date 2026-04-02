@@ -1,0 +1,127 @@
+--- py/stabilizer/stream.py
++++ py/stabilizer/stream.py
+@@ -39,69 +39,114 @@
+     finally:
+         sock.close()
+ 
++class Frame:
++    """Stream frame constisting of a header and multiple data batches"""
++    magic = 0x057B
++    header_fmt = struct.Struct("<HBBI")
++    header = namedtuple("Header", "magic format_id batches sequence")
++    parsers = {}
++
++    @classmethod
++    def register(cls, fmt):
++        cls.parsers[fmt.format_id] = fmt
++
++    @classmethod
++    def parse(cls, data):
++        header = cls.header._make(cls.header_fmt.unpack_from(data))
++        if header.magic != cls.magic:
++            raise ValueError(f"Bad frame magic: {header.magic:#04x}")
++        try:
++            parser = cls.parsers[header.format_id]
++        except KeyError as exc:
++            raise ValueError(f"No parser for format: {header.format_id}") from exc
++        return parser(header, data[cls.header_fmt.size :])
+ 
+ class AdcDac:
+     """Stabilizer default streaming data format"""
+-
+     format_id = 1
+-    header = namedtuple("Header", "magic format_id batches sequence")
+-    header_fmt = struct.Struct("<HBBI")
+ 
+     def __init__(self, header, body):
+         self.header = header
+         self.body = body
+ 
++    def size(self):
++        return len(self.body)
++
++    def to_mu(self):
++        data = np.frombuffer(self.body, "<i2")
++        data = data.reshape(self.header.batches, 4, -1)
++        data = data.swapaxes(0, 1).reshape(4, -1)
++        data[2:] ^= np.int16(0x8000)
++        return data
++
+     def to_si(self):
+-        """Convert the raw data to SI units"""
+-        data = np.frombuffer(self.body, "<i2")
+-        data = data.reshape(self.header.batches, 4, -1)
+-        data = data.swapaxes(0, 1).reshape(4, -1)
+-        data[2:] ^= np.uint16(0x8000)
++        data = self.to_mu() * DAC_VOLTS_PER_LSB
+         return {
+-            "adc": data[:2] * DAC_VOLTS_PER_LSB,
+-            "dac": data[2:] * DAC_VOLTS_PER_LSB,
++            "adc": data[:2],
++            "dac": data[2:],
+         }
+ 
++Frame.register(AdcDac)
+ 
+-class StabilizerStream(asyncio.DatagramProtocol):
++class StabilizerStream(asyncio.DatagramProtocol):
+     """Stabilizer streaming receiver protocol"""
+ 
+-    parsers = {AdcDac.format_id: AdcDac}
+-
+     @classmethod
+-    async def open(cls, addr, port, broker, maxsize=1):
++    async def open(cls, port=1234, addr="0.0.0.0", local="0.0.0.0", maxsize=1):
++        """Open a UDP socket and start receiving frames"""
+         loop = asyncio.get_running_loop()
+         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
++        try:
++            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
++        except NameError:
++            pass
+-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 << 20)
++        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 << 20)
+         if ipaddress.ip_address(addr).is_multicast:
+-            group = socket.inet_aton(addr)
+-            iface = socket.inet_aton(get_local_ip(broker))
+-            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, group + iface)
+-            sock.bind(("", port))
+-        else:
+-            sock.bind((addr, port))
++            multiaddr = socket.inet_aton(addr)
++            local = socket.inet_aton(local)
++            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, multiaddr + local)
++            try:
++                sock.setsockopt(socket.IPPROTO_IP, getattr(socket, "IP_MULTICAST_ALL", 49), 0)
++            except OSError:
++                pass
++        sock.bind((addr, port))
+         transport, protocol = await loop.create_datagram_endpoint(
+             lambda: cls(maxsize), sock=sock
+         )
+         return transport, protocol
+ 
+     def __init__(self, maxsize):
+         self.queue = asyncio.Queue(maxsize)
+ 
+     def connection_made(self, _transport):
+         logger.info("Connection made (listening)")
+ 
+     def connection_lost(self, _exc):
+         logger.info("Connection lost")
+ 
+     def datagram_received(self, data, _addr):
+-        header = AdcDac.header._make(AdcDac.header_fmt.unpack_from(data))
+-        if header.magic != 0x057B:
++        try:
++            frame = Frame.parse(data)
++        except ValueError as e:
++            logger.warning("Parse error: %s", e)
+             return
+-        frame = AdcDac(header, data[AdcDac.header_fmt.size :])
+         if self.queue.full():
+-            self.queue.get_nowait()
++            old = self.queue.get_nowait()
++            logger.debug("Dropping frame: %#08x", old.header.sequence)
+         self.queue.put_nowait(frame)

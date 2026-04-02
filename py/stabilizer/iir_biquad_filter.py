@@ -8,7 +8,7 @@ Author:  Giacomo  Bisson
 import numpy as np
 import argparse
 import stabilizer
-import stabilizer.iir_coefficients as iir_coefficients
+import stabilizer.iir_configuration as iir_configuration
 from scipy.signal import lfilter
 
 
@@ -33,21 +33,21 @@ class IirBiquadFilter:
 
         filter_args = FilterArgs()
 
-        self.filters = iir_coefficients.get_filters()
+        self.filters = iir_configuration.get_filters()
         if filter_type not in self.filters:
             raise ValueError(f"Unknown filter type: {filter_type}")
 
         if filter_type == "lowpass":
-            self.coefficients = iir_coefficients.lowpass_coefficients(filter_args)
+            self.coefficients = iir_configuration.lowpass_coefficients(filter_args)
 
         elif filter_type == "highpass":
-            self.coefficients = iir_coefficients.highpass_coefficients(filter_args)
+            self.coefficients = iir_configuration.highpass_coefficients(filter_args)
 
         elif filter_type == "allpass":
-            self.coefficients = iir_coefficients.allpass_coefficients(filter_args)
+            self.coefficients = iir_configuration.allpass_coefficients(filter_args)
 
         elif filter_type == "notch":
-            self.coefficients = iir_coefficients.notch_coefficients(filter_args)
+            self.coefficients = iir_configuration.notch_coefficients(filter_args)
 
     def apply_filter(self, x, min_values=-10, max_values=10) -> np.ndarray:
         """

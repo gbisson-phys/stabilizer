@@ -258,7 +258,7 @@ def _main():
         "--broker",
         "-b",
         type=str,
-        default="192.168.199.251",
+        default="10.42.0.1",
         help="The MQTT broker to use to communicate with " "Stabilizer (%(default)s)",
     )
     parser.add_argument(
@@ -312,15 +312,15 @@ def _main():
         help="The number of IIR filters in the cascade (%(default)s)",
     )
     parser.add_argument(
-        "--cpu-dac1", type=int, default=4095, help="CPU DAC1 value (%(default)s)"
+        "--cpu-dac1", type=int, default=None, help="CPU DAC1 value (%(default)s)"
     )
     parser.add_argument(
-        "--frontend-offset", type=int, default=0, help="Frontend offset (%(default)s)"
+        "--frontend-offset", type=int, default=None, help="Frontend offset (%(default)s)"
     )
     parser.add_argument(
         "--stream-target",
         type=str,
-        default="192.168.199.251:1234",
+        default=None,
         help="Stream target address",
     )
 
@@ -405,51 +405,63 @@ def _main():
 
             interface = miniconf.Miniconf(client, prefix)
 
-            async def set_recursive(base_path, data):
-                """Helper to set all leaves in a dictionary recursively"""
-                if isinstance(data, dict):
-                    for key, val in data.items():
-                        await set_recursive(f"{base_path}/{key}", val)
-                else:
-                    await interface.set(base_path, data)
+            async def set_biquad(idx, config):
+                path = f"/ch/{args.channel}/biquad/{idx}"
+                typ = config["typ"]
+                inner = config["repr"][typ]
+                
+                # 1. Select the variant
+                await interface.set(f"{path}/typ", typ)
+                
+                # 2. Set parameters based on variant-specific leaf structure
+                if typ == "Filter":
+                    # For FilterRepr, most fields are leaves, including 'shape'
+                    for key, val in inner.items():
+                        await interface.set(f"{path}/repr/Filter/{key}", val)
+                elif typ == "Pid":
+                    # For Pid, 'gain' and 'limit' are branches, others are leaves
+                    for key, val in inner.items():
+                        if key in ["gain", "limit"]:
+                            for subkey, subval in val.items():
+                                await interface.set(f"{path}/repr/Pid/{key}/{subkey}", subval)
+                        else:
+                            await interface.set(f"{path}/repr/Pid/{key}", val)
+                elif typ == "Raw":
+                    # BiquadRepr::Raw is a single leaf
+                    await interface.set(f"{path}/repr/Raw", inner)
 
             # Set the filter coefficients.
             for cascade_idx in range(args.iir_cascade_length):
-                c = configs_list[cascade_idx]
-                typ = c["typ"]
-                path = f"/ch/{args.channel}/biquad/{cascade_idx}"
-                
-                # 1. Switch the variant
-                await interface.set(f"{path}/typ", typ)
-                
-                # 2. Set the parameters for that variant
-                await set_recursive(f"{path}/repr/{typ}", c["repr"][typ])
+                await set_biquad(cascade_idx, configs_list[cascade_idx])
                 
             if args.iir_cascade_length == 1:
-                # Idle the disabled cascade block as Raw pass-through to not break it
-                path = f"/ch/{args.channel}/biquad/1"
-                await interface.set(f"{path}/typ", "Raw")
+                # Idle the second biquad
+                await set_biquad(1, {
+                    "typ": "Raw",
+                    "repr": {
+                        "Raw": {
+                            "coeff": {"ba": [1.0, 0.0, 0.0, 0.0, 0.0]},
+                            "u": 0.0,
+                            "min": stabilizer.voltage_to_machine_units(args.y_min),
+                            "max": stabilizer.voltage_to_machine_units(args.y_max),
+                        }
+                    }
+                })
+            if args.cpu_dac1 is not None:
                 await interface.set(
-                    f"{path}/repr/Raw",
-                    {
-                        "coeff": {"ba": [1.0, 0.0, 0.0, 0.0, 0.0]},
-                        "u": 0.0,
-                        "min": stabilizer.voltage_to_machine_units(args.y_min),
-                        "max": stabilizer.voltage_to_machine_units(args.y_max),
-                    },
+                    path="/cpu_dac1",
+                    value=args.cpu_dac1,
                 )
-            await interface.set(
-                path="/cpu_dac1",
-                value=args.cpu_dac1,
-            )
-            await interface.set(
-                path="/frontend_offset",
-                value=args.frontend_offset,
-            )
-            await interface.set(
-                path="/stream",
-                value=args.stream_target,
-            )
+            if args.frontend_offset is not None:
+                await interface.set(
+                    path="/frontend_offset",
+                    value=args.frontend_offset,
+                )
+            if args.stream_target is not None:
+                await interface.set(
+                    path="/stream",
+                    value=args.stream_target,
+                )
 
     asyncio.run(configure())
 
